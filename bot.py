@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 # ===================== CONFIG =====================
@@ -61,6 +60,37 @@ class UserRec:
 #   "avatars": {"male": url(str), "female": url(str)}
 # }
 store = {"male_next": 1, "female_next": 1, "users": {}, "avatars": {}}
+
+ZWSP = "\u200b"  # ゼロ幅スペース（空投稿対策）
+
+# ===================== SMALL HELPERS (testable) ===
+
+def build_status_msg(target_id: int, male_next: int, female_next: int, male_url: str, female_url: str) -> str:
+    """Compose the status message safely without f-strings.
+
+    >>> s = build_status_msg(123, 5, 7, "m.png", "f.png")
+    >>> s.splitlines()[0]
+    '対象カテゴリ: <#123>'
+    >>> '次の男性別名: 男5 / 次の女性別名: 女7' in s
+    True
+    >>> '男性アイコン: m.png' in s and '女性アイコン: f.png' in s
+    True
+    """
+    return (
+        "対象カテゴリ: <#{}>\n"
+        "次の男性別名: 男{} / 次の女性別名: 女{}\n"
+        "男性アイコン: {}\n"
+        "女性アイコン: {}"
+    ).format(target_id, male_next, female_next, male_url, female_url)
+
+
+def build_reply_quote(head: str, content: str) -> str:
+    """Format quoted reply safely.
+
+    >>> build_reply_quote('hello', 'world')
+    '> **返信:** hello\nworld'
+    """
+    return "> **返信:** {}\n{}".format(head, content)
 
 # ===================== PERSIST ====================
 
@@ -162,16 +192,14 @@ async def ensure_avatar_urls(guild: discord.Guild):
 
 @bot.tree.command(name="status_anon", description="匿名化の状況を表示")
 async def status_anon(interaction: discord.Interaction):
-    male_url = store["avatars"].get("male", "(未設定)")
-    female_url = store["avatars"].get("female", "(未設定)")
-    msg = (
-        f"対象カテゴリ: <#{TARGET_CATEGORY_ID}>
-"
-        f"次の男性別名: 男{store['male_next']} / 次の女性別名: 女{store['female_next']}
-"
-        f"男性アイコン: {male_url}
-"
-        f"女性アイコン: {female_url}"
+    male_url = store.get("avatars", {}).get("male", "(未設定)")
+    female_url = store.get("avatars", {}).get("female", "(未設定)")
+    msg = build_status_msg(
+        TARGET_CATEGORY_ID,
+        store.get('male_next', 1),
+        store.get('female_next', 1),
+        male_url,
+        female_url,
     )
     await interaction.response.send_message(msg, ephemeral=True)
 
@@ -228,13 +256,12 @@ async def on_message(message: discord.Message):
         # 返信は引用に変換（Webhookでの message reference 代替）
         if message.reference and isinstance(message.reference.resolved, discord.Message):
             quoted = message.reference.resolved
-            head = (quoted.content or "(添付のみ)").replace("`", "​`")
+            head = (quoted.content or "(添付のみ)").replace("`", "\u200b`")
             head = head[:120] + ("…" if len(head) > 120 else "")
-            content = f"> **返信:** {head}
-{content}"
+            content = build_reply_quote(head, content)
 
         await webhook.send(
-            content or "​",
+            content or ZWSP,
             username=store["users"][uid]["alias"],
             avatar_url=avatar_url,
             files=files if files else None,
