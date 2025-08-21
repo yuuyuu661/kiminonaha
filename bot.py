@@ -327,7 +327,9 @@ async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 
+
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise RuntimeError("環境変数 DISCORD_TOKEN を設定してください。")
     bot.run(DISCORD_TOKEN)
+
