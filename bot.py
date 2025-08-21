@@ -7,7 +7,7 @@ from discord import app_commands
 # ====== 環境変数 ======
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # 必須
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-# ギルド即時反映（カンマ区切りで複数可）。未設定時は例のID。
+# ギルド即時反映（カンマ区切りで複数可）
 GUILD_IDS = [int(x.strip()) for x in os.getenv("GUILD_IDS", "1398607685158440991").split(",") if x.strip().isdigit()]
 
 # ====== ログ ======
@@ -26,16 +26,13 @@ tree = bot.tree
 
 # ====== 共通ユーティリティ ======
 def channel_jump_url(guild_id: int, channel_id: int) -> str:
-    """そのチャンネルを開くジャンプURL"""
     return f"https://discord.com/channels/{guild_id}/{channel_id}"
 
 
 async def pick_representative_text_channel_for_category(guild: discord.Guild, category_id: int) -> discord.TextChannel | None:
-    """カテゴリ内で位置が一番上のテキストチャンネルを返す（なければNone）"""
     category = discord.utils.get(guild.categories, id=category_id)
     if not category:
         return None
-    # position の小さい順（上にある順）
     text_channels = sorted(
         [ch for ch in category.channels if isinstance(ch, discord.TextChannel)],
         key=lambda c: c.position
@@ -43,10 +40,10 @@ async def pick_representative_text_channel_for_category(guild: discord.Guild, ca
     return text_channels[0] if text_channels else None
 
 
-# ====== コマンド群 ======
+# ====== ボタン作成コマンド ======
 @tree.command(name="create_jump_button", description="指定したチャンネルへ飛べるボタンを作成します。")
 @app_commands.describe(
-    channel_id="ジャンプ先のチャンネルID（テキスト/ボイスどちらでも可。推奨はテキスト）",
+    channel_id="ジャンプ先のチャンネルID（テキスト/ボイスどちらでも可）",
     label="ボタンの表示名（未指定時はチャンネル名）",
 )
 async def create_jump_button(interaction: discord.Interaction, channel_id: str, label: str | None = None):
@@ -63,7 +60,6 @@ async def create_jump_button(interaction: discord.Interaction, channel_id: str, 
     if channel is None:
         return await interaction.response.send_message("指定チャンネルが見つかりません。権限/IDをご確認ください。", ephemeral=True)
 
-    # ボタンのラベル
     button_label = label or (channel.name if hasattr(channel, "name") else "Open Channel")
     url = channel_jump_url(guild.id, target_id)
 
@@ -80,9 +76,9 @@ async def create_jump_button(interaction: discord.Interaction, channel_id: str, 
     log.info(f"Posted jump button to channel {interaction.channel_id} -> {url}")
 
 
-@tree.command(name="create_category_button", description="カテゴリに対応する『代表テキストチャンネル』へ飛べるボタンを作成します。")
+@tree.command(name="create_category_button", description="カテゴリの代表テキストチャンネルへ飛べるボタンを作成します。")
 @app_commands.describe(
-    category_id="カテゴリID（カテゴリ自体には直リンク不可のため、最上段のテキストチャンネルに飛びます）",
+    category_id="カテゴリID（カテゴリ自体に直リンク不可のため、最上段のテキストチャンネルに飛びます）",
     label="ボタンの表示名（未指定時はカテゴリ名）",
 )
 async def create_category_button(interaction: discord.Interaction, category_id: str, label: str | None = None):
@@ -166,15 +162,79 @@ async def create_category_menu(interaction: discord.Interaction, category_id: st
     await interaction.response.send_message(embed=embed, view=view)
 
 
+# ====== 文章送信コマンド ======
+@tree.command(name="say", description="Botとしてこのチャンネルへ任意の文章を投稿します。")
+@app_commands.describe(
+    content="投稿する本文（2000文字を超える場合は自動分割）",
+    as_embed="埋め込みで送信する（長文時に見やすい）",
+    suppress_mentions="メンションを抑制する（@everyone/@here/ロール/ユーザー）",
+    reply_to_message_id="返信先メッセージのID（任意）"
+)
+async def say(
+    interaction: discord.Interaction,
+    content: str,
+    as_embed: bool = False,
+    suppress_mentions: bool = True,
+    reply_to_message_id: str | None = None
+):
+    """指定テキストをボットとして送信。"""
+    channel = interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+        return await interaction.response.send_message("テキストチャンネル内で実行してください。", ephemeral=True)
+
+    # 返信先
+    reference = None
+    if reply_to_message_id:
+        try:
+            ref_id = int(reply_to_message_id)
+            if hasattr(channel, "fetch_message"):
+                msg = await channel.fetch_message(ref_id)
+                reference = msg.to_reference()
+        except Exception:
+            # 取得失敗でも続行（単に返信しない）
+            reference = None
+
+    # メンション制御
+    allowed = discord.AllowedMentions(everyone=not suppress_mentions,
+                                      roles=not suppress_mentions,
+                                      users=not suppress_mentions,
+                                      replied_user=False)
+
+    # 送信処理
+    async def send_text(text: str):
+        if as_embed:
+            embed = discord.Embed(description=text, color=0x95A5A6)
+            await channel.send(embed=embed, allowed_mentions=allowed, reference=reference)
+        else:
+            await channel.send(text, allowed_mentions=allowed, reference=reference)
+
+    # 2000文字制限対応：分割（改行優先で切り出し、最悪ハードカット）
+    MAX_LEN = 2000 if not as_embed else 4096  # Embed description上限
+    if len(content) <= MAX_LEN:
+        await send_text(content)
+    else:
+        buf = content
+        while buf:
+            if len(buf) <= MAX_LEN:
+                chunk, buf = buf, ""
+            else:
+                # 余裕を持って切る
+                cut = buf.rfind("\n", 0, MAX_LEN)
+                if cut == -1:
+                    cut = MAX_LEN
+                chunk, buf = buf[:cut], buf[cut:].lstrip("\n")
+            await send_text(chunk)
+
+    await interaction.response.send_message("✅ 送信しました。", ephemeral=True)
+    log.info(f"/say used by {interaction.user.id} in {interaction.channel_id}")
+
 # ====== 起動・同期 ======
 @bot.event
 async def on_ready():
     try:
         if GUILD_IDS:
-            # 各ギルドに即時同期（グローバル待ち不要）
             for gid in GUILD_IDS:
-                guild = discord.Object(id=gid)
-                await tree.sync(guild=guild)
+                await tree.sync(guild=discord.Object(id=gid))
                 log.info(f"Synced commands to guild {gid}")
         else:
             await tree.sync()
