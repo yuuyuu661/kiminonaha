@@ -76,16 +76,9 @@ def build_status_msg(target_id: int, male_next: int, female_next: int, male_url:
     >>> '男性アイコン: m.png' in s and '女性アイコン: f.png' in s
     True
     """
-    return (
-        "対象チャンネル: <#{}>
-"
-        "次の男性別名: 男{} / 次の女性別名: 女{}
-"
-        "男性アイコン: {}
-"
-        "女性アイコン: {}"
-    ).format(target_id, male_next, female_next, male_url, female_url)
-
+    return "対象チャンネル: <#{}>\n次の男性別名: 男{} / 次の女性別名: 女{}\n男性アイコン: {}\n女性アイコン: {}".format(
+        target_id, male_next, female_next, male_url, female_url
+    )
 
 def build_reply_quote(head: str, content: str) -> str:
     """Format quoted reply safely.
@@ -339,3 +332,4 @@ if __name__ == "__main__":
         print("Please set DISCORD_TOKEN")
     else:
         bot.run(TOKEN)
+
