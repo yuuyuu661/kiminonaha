@@ -1,8 +1,9 @@
 # bot.py
-# Discord anonymizer bot (role-based only). Participants are inferred by gender roles,
-# and messages in the target category are reposted via webhook with fixed avatars and aliases.
-# Images are loaded from local ./image folder at startup, uploaded once to Discord to obtain CDN URLs,
-# and then reused for webhook avatars.
+# Discord anonymizer bot (role-based only) with channel-based targeting.
+# - Messages in TARGET_CHANNEL_ID are reposted via webhook with gendered alias (男1/女1...) and fixed avatars.
+# - Gender is determined ONLY by roles (MALE_ROLE_ID / FEMALE_ROLE_ID).
+# - Avatars are loaded from ./image and uploaded once to ASSET_CHANNEL_ID to obtain CDN URLs.
+# - Optional: a join panel can be posted to JOIN_PANEL_CHANNEL_ID to explain the rules.
 
 import os
 import json
@@ -13,32 +14,31 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-# ===================== CONFIG =====================
+# ===================== CONFIG (IDs you provided) =====================
 TOKEN = os.getenv("DISCORD_TOKEN", "PASTE_YOUR_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))  # 即時同期したいギルドID（任意）
 
-# 固定カテゴリID（このカテゴリ配下が匿名化対象）
-TARGET_CATEGORY_ID = 1407976096821018766
+# --- Channels ---
+ASSET_CHANNEL_ID = 1407976326199120053        # ロール別画像アップロード用
+JOIN_PANEL_CHANNEL_ID = 1407986289990438912   # 参加ボタン設置用
+TARGET_CHANNEL_ID = 1407976431056719945       # 匿名化チャット送信先
 
-# 男女ロールID（ロール判定のみを使用）
+# --- Roles (role-based only) ---
 MALE_ROLE_ID = 1399390214295785623
 FEMALE_ROLE_ID = 1399390384756363264
 
-# 画像アップロード用のチャンネル（任意）。指定しない場合は対象カテゴリ内の最初のテキストチャンネルを使用
-ASSET_CHANNEL_ID = int(os.getenv("ASSET_CHANNEL_ID", "0"))
-
-# ローカル画像パス（Railway ではリポジトリ内に同梱しておく）
+# --- Local images ---
 MALE_IMAGE_PATH = os.getenv("MALE_IMAGE_PATH", "image/male.png")
 FEMALE_IMAGE_PATH = os.getenv("FEMALE_IMAGE_PATH", "image/female.png")
 
-# データ保存
+# --- Data file ---
 DATA_FILE = os.getenv("DATA_FILE", "anonymize_data.json")
 
-# ===================== LOGGING ====================
+# ===================== LOGGING =====================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("anon-bot")
 
-# ===================== DISCORD ====================
+# ===================== DISCORD =====================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -61,7 +61,7 @@ class UserRec:
 # }
 store = {"male_next": 1, "female_next": 1, "users": {}, "avatars": {}}
 
-ZWSP = "\u200b"  # ゼロ幅スペース（空投稿対策）
+ZWSP = "​"  # ゼロ幅スペース（空投稿対策）
 
 # ===================== SMALL HELPERS (testable) ===
 
@@ -70,16 +70,19 @@ def build_status_msg(target_id: int, male_next: int, female_next: int, male_url:
 
     >>> s = build_status_msg(123, 5, 7, "m.png", "f.png")
     >>> s.splitlines()[0]
-    '対象カテゴリ: <#123>'
+    '対象チャンネル: <#123>'
     >>> '次の男性別名: 男5 / 次の女性別名: 女7' in s
     True
     >>> '男性アイコン: m.png' in s and '女性アイコン: f.png' in s
     True
     """
     return (
-        "対象カテゴリ: <#{}>\n"
-        "次の男性別名: 男{} / 次の女性別名: 女{}\n"
-        "男性アイコン: {}\n"
+        "対象チャンネル: <#{}>
+"
+        "次の男性別名: 男{} / 次の女性別名: 女{}
+"
+        "男性アイコン: {}
+"
         "女性アイコン: {}"
     ).format(target_id, male_next, female_next, male_url, female_url)
 
@@ -88,9 +91,11 @@ def build_reply_quote(head: str, content: str) -> str:
     """Format quoted reply safely.
 
     >>> build_reply_quote('hello', 'world')
-    '> **返信:** hello\nworld'
+    '> **返信:** hello
+world'
     """
-    return "> **返信:** {}\n{}".format(head, content)
+    return "> **返信:** {}
+{}".format(head, content)
 
 # ===================== PERSIST ====================
 
@@ -128,11 +133,11 @@ def next_alias(gender: str) -> str:
     if gender == "female":
         n = store["female_next"]
         store["female_next"] = n + 1
-        return f"女{n}"
+        return "女{}".format(n)
     else:
         n = store["male_next"]
         store["male_next"] = n + 1
-        return f"男{n}"
+        return "男{}".format(n)
 
 async def ensure_avatar_urls(guild: discord.Guild):
     """Upload local images once to Discord to get CDN URLs, store them in `store['avatars']`."""
@@ -140,29 +145,20 @@ async def ensure_avatar_urls(guild: discord.Guild):
     if store["avatars"].get("male") and store["avatars"].get("female"):
         return
 
-    # 画像がなければスキップ（その場合はWebhookのデフォルトアイコンになる）
     need_male = os.path.exists(MALE_IMAGE_PATH)
     need_female = os.path.exists(FEMALE_IMAGE_PATH)
     if not need_male and not need_female:
         log.warning("No local avatar images found. Skipping avatar upload.")
         return
 
-    # アップロード先チャンネルを決定
+    # アップロード先チャンネルを決定（ASSET_CHANNEL_ID 優先）
     channel: Optional[discord.TextChannel] = None
     if ASSET_CHANNEL_ID:
         ch = guild.get_channel(ASSET_CHANNEL_ID)
         if isinstance(ch, discord.TextChannel):
             channel = ch
-    if channel is None:
-        # 対象カテゴリ内の最初のテキストチャンネル
-        for ch in guild.text_channels:
-            if ch.category and ch.category.id == TARGET_CATEGORY_ID:
-                channel = ch
-                break
-    if channel is None:
-        # どこでも良いので最初のテキストチャンネル
-        if guild.text_channels:
-            channel = guild.text_channels[0]
+    if channel is None and guild.text_channels:
+        channel = guild.text_channels[0]
     if channel is None:
         log.error("No text channel available to upload avatar images.")
         return
@@ -195,7 +191,7 @@ async def status_anon(interaction: discord.Interaction):
     male_url = store.get("avatars", {}).get("male", "(未設定)")
     female_url = store.get("avatars", {}).get("female", "(未設定)")
     msg = build_status_msg(
-        TARGET_CATEGORY_ID,
+        TARGET_CHANNEL_ID,
         store.get('male_next', 1),
         store.get('female_next', 1),
         male_url,
@@ -208,6 +204,39 @@ async def reload_avatars(interaction: discord.Interaction):
     await ensure_avatar_urls(interaction.guild)
     await interaction.response.send_message("アバターURLを再取得しました。", ephemeral=True)
 
+# 任意：JOINパネルを配置（情報表示用）
+class JoinView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="参加方法を見る", style=discord.ButtonStyle.primary, custom_id="join_info")
+    async def join_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+        text = (
+            "このサーバーの匿名化は『ロール判定のみ』で動作します。
+"
+            "・男ロールを持つ → 男1/男2…
+"
+            "・女ロールを持つ → 女1/女2…
+"
+            "対象チャンネル: <#{}>
+"
+            "※ロールが無いユーザーの発言は匿名化されません。"
+        ).format(TARGET_CHANNEL_ID)
+        await interaction.response.send_message(text, ephemeral=True)
+
+@bot.tree.command(name="post_join_panel", description="JOINパネルを設置（情報表示のみ）")
+async def post_join_panel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    if channel is None:
+        # 既定の JOIN_PANEL_CHANNEL_ID に投稿
+        ch = interaction.guild.get_channel(JOIN_PANEL_CHANNEL_ID)
+        if isinstance(ch, discord.TextChannel):
+            channel = ch
+        else:
+            channel = interaction.channel
+    view = JoinView()
+    await channel.send("匿名化のルール：ボタンから確認できます。", view=view)
+    await interaction.response.send_message("JOINパネルを設置しました。", ephemeral=True)
+
 # ===================== MESSAGE RELAY ==============
 
 @bot.event
@@ -216,8 +245,8 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    # 対象カテゴリでなければスルー
-    if not message.channel.category or message.channel.category.id != TARGET_CATEGORY_ID:
+    # 対象チャンネルのみ
+    if message.channel.id != TARGET_CHANNEL_ID:
         return
 
     # ロールで性別判定（なければスルー）
@@ -256,7 +285,7 @@ async def on_message(message: discord.Message):
         # 返信は引用に変換（Webhookでの message reference 代替）
         if message.reference and isinstance(message.reference.resolved, discord.Message):
             quoted = message.reference.resolved
-            head = (quoted.content or "(添付のみ)").replace("`", "\u200b`")
+            head = (quoted.content or "(添付のみ)").replace("`", "​`")
             head = head[:120] + ("…" if len(head) > 120 else "")
             content = build_reply_quote(head, content)
 
@@ -295,6 +324,12 @@ async def on_ready():
             await ensure_avatar_urls(guild)
     except Exception:
         log.exception("Avatar ensure failed")
+
+    # 永続View登録（再起動後もJOINボタンを生かす）
+    try:
+        bot.add_view(JoinView())
+    except Exception:
+        pass
 
     log.info("Logged in as %s", bot.user)
 
