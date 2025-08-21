@@ -7,8 +7,10 @@ from discord import app_commands
 # ====== 環境変数 ======
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # 必須
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-# 即時反映したいサーバーIDをカンマ区切りで（例: "1398607685158440991,123..."）
-GUILD_IDS = [int(x.strip()) for x in os.getenv("GUILD_IDS", "1398607685158440991").split(",") if x.strip().isdigit()]
+
+# GUILD_IDS: 空なら “全参加ギルドへ同期”。カンマ区切りで複数可。
+_GUILD_IDS_ENV = os.getenv("GUILD_IDS", "").strip()
+GUILD_IDS = [int(x.strip()) for x in _GUILD_IDS_ENV.split(",") if x.strip().isdigit()]
 
 # ====== 制限ロール ======
 ALLOWED_ROLE_ID = 1398724601256874014  # ← このロール所持者のみ実行可
@@ -29,7 +31,6 @@ tree = bot.tree
 
 # ====== 権限チェック ======
 def has_required_role(interaction: discord.Interaction) -> bool:
-    """指定ロールを持っているか確認"""
     if not interaction.user or not isinstance(interaction.user, discord.Member):
         return False
     return any(r.id == ALLOWED_ROLE_ID for r in interaction.user.roles)
@@ -39,7 +40,6 @@ def role_check():
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    # 権限不足の文言を分かりやすく出す
     if isinstance(error, app_commands.CheckFailure):
         try:
             if interaction.response.is_done():
@@ -49,7 +49,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         except Exception:
             pass
         return
-    # その他はログのみ
     log.exception("App command error: %s", error)
 
 
@@ -213,7 +212,6 @@ async def say(
     if not isinstance(channel, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
         return await interaction.response.send_message("テキストチャンネル内で実行してください。", ephemeral=True)
 
-    # 返信先
     reference = None
     if reply_to_message_id:
         try:
@@ -222,9 +220,8 @@ async def say(
                 msg = await channel.fetch_message(ref_id)
                 reference = msg.to_reference()
         except Exception:
-            reference = None  # 取得失敗でも続行
+            reference = None
 
-    # メンション制御
     allowed = discord.AllowedMentions(
         everyone=not suppress_mentions,
         roles=not suppress_mentions,
@@ -239,7 +236,6 @@ async def say(
         else:
             await channel.send(text, allowed_mentions=allowed, reference=reference)
 
-    # 文字数制限対応（Embed: 4096 / 通常: 2000）
     MAX_LEN = 4096 if as_embed else 2000
     if len(content) <= MAX_LEN:
         await send_text(content)
@@ -259,7 +255,7 @@ async def say(
     log.info(f"/say used by {interaction.user.id} in {interaction.channel_id}")
 
 
-# ====== 登録確認 & 強制再同期 ======
+# ====== 登録確認 / 強制再同期 / 招待リンク ======
 @tree.command(name="list_commands", description="このサーバーに登録済みのスラッシュコマンド一覧を表示します。")
 @role_check()
 async def list_commands(interaction: discord.Interaction):
@@ -273,13 +269,11 @@ async def list_commands(interaction: discord.Interaction):
 async def resync_commands(interaction: discord.Interaction):
     await interaction.response.send_message("⏳ コマンドを再同期中…", ephemeral=True)
     try:
-        # グローバルをクリア → 同期（ここでは現定義を反映）
         tree.clear_commands(guild=None)
         await tree.sync()
 
-        # 参加中のギルドだけに再同期
         joined_ids = {g.id for g in bot.guilds}
-        target_ids = [gid for gid in GUILD_IDS if gid in joined_ids] if GUILD_IDS else list(joined_ids)
+        target_ids = GUILD_IDS if GUILD_IDS else list(joined_ids)
 
         for gid in target_ids:
             guild_obj = discord.Object(id=gid)
@@ -288,38 +282,49 @@ async def resync_commands(interaction: discord.Interaction):
 
         await interaction.followup.send("✅ 再同期が完了しました。Discordを再読込すると反映が早いです。", ephemeral=True)
     except discord.Forbidden:
-        await interaction.followup.send("❌ Missing Access。招待スコープ `applications.commands` と権限を確認してください。", ephemeral=True)
+        await interaction.followup.send("❌ Missing Access。招待スコープ `bot+applications.commands` と権限を確認してください。", ephemeral=True)
     except Exception as e:
         log.exception("Resync failed: %s", e)
         await interaction.followup.send(f"❌ 予期せぬエラー: {e}", ephemeral=True)
 
+@tree.command(name="invite_link", description="このBotの正しい招待URLを表示します。")
+@role_check()
+async def invite_link(interaction: discord.Interaction, permissions: int = 84992):
+    cid = interaction.client.user.id
+    url = f"https://discord.com/oauth2/authorize?client_id={cid}&permissions={permissions}&scope=bot+applications.commands"
+    await interaction.response.send_message(f"招待URL：\n{url}", ephemeral=True)
 
-# ====== 起動・同期（堅牢版） ======
+
+# ====== 起動・同期（必ずどこかに同期されるフォールバック付き） ======
 @bot.event
 async def on_ready():
     try:
-        if GUILD_IDS:
-            joined_ids = {g.id for g in bot.guilds}
-            target_ids = [gid for gid in GUILD_IDS if gid in joined_ids]
-            missing = [gid for gid in GUILD_IDS if gid not in joined_ids]
-            if missing:
-                log.warning(f"Bot is not in these guilds (skip sync): {missing}")
+        joined_ids = [g.id for g in bot.guilds]
+        log.info(f"Joined guilds: {joined_ids}")
 
-            for gid in target_ids:
-                try:
-                    await tree.sync(guild=discord.Object(id=gid))  # 即時ギルド同期
-                    log.info(f"Synced commands to guild {gid}")
-                except discord.Forbidden:
-                    log.error(f"Missing access to sync guild {gid}. Check invite scope 'applications.commands' and permissions.")
-                except Exception as e:
-                    log.exception(f"Sync failed for guild {gid}: {e}")
-        else:
-            await tree.sync()  # グローバル同期（反映遅め）
-            log.info("Synced commands globally")
+        # 1) GUILD_IDS が指定されていればそのギルドに同期
+        target_ids = [gid for gid in GUILD_IDS if gid in joined_ids]
+
+        # 2) 指定が空 or どれも参加していない場合は、参加している全ギルドに同期（フォールバック）
+        if not target_ids:
+            target_ids = joined_ids
+            if _GUILD_IDS_ENV:
+                log.warning("GUILD_IDS に参加していないIDが指定されています。全参加ギルドへフォールバック同期します。")
+
+        # 同期実行
+        for gid in target_ids:
+            try:
+                await tree.sync(guild=discord.Object(id=gid))
+                log.info(f"Synced commands to guild {gid}")
+            except discord.Forbidden:
+                log.error(f"Missing access to sync guild {gid}. Check invite scope and permissions.")
+            except Exception as e:
+                log.exception(f"Sync failed for guild {gid}: {e}")
+
     except Exception as e:
         log.exception("Slash command sync failed: %s", e)
 
-    # 同期結果の可視化（デバッグ）
+    # デバッグ：各ギルドの登録コマンド名を出力
     for g in bot.guilds:
         names = [c.name for c in tree.get_commands(guild=g)]
         log.info(f"Guild {g.id}: {len(names)} commands -> {names}")
@@ -327,9 +332,7 @@ async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 
-
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise RuntimeError("環境変数 DISCORD_TOKEN を設定してください。")
     bot.run(DISCORD_TOKEN)
-
