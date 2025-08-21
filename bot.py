@@ -164,15 +164,13 @@ async def ensure_avatar_urls(guild: discord.Guild):
 async def status_anon(interaction: discord.Interaction):
     male_url = store["avatars"].get("male", "(未設定)")
     female_url = store["avatars"].get("female", "(未設定)")
-    await interaction.response.send_message(
-        f"対象カテゴリ: <#{TARGET_CATEGORY_ID}>
-"
-        f"次の男性別名: 男{store['male_next']} / 次の女性別名: 女{store['female_next']}
-"
-        f"男性アイコン: {male_url}
-女性アイコン: {female_url}",
-        ephemeral=True,
+    msg = (
+        f"対象カテゴリ: <#{TARGET_CATEGORY_ID}>\n"
+        f"次の男性別名: 男{store['male_next']} / 次の女性別名: 女{store['female_next']}\n"
+        f"男性アイコン: {male_url}\n"
+        f"女性アイコン: {female_url}"
     )
+    await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="reload_avatars", description="ローカル画像を再アップロードしてWebhook用アイコンURLを更新")
 async def reload_avatars(interaction: discord.Interaction):
@@ -276,3 +274,4 @@ if __name__ == "__main__":
         print("Please set DISCORD_TOKEN")
     else:
         bot.run(TOKEN)
+
