@@ -247,7 +247,31 @@ async def say(
     await interaction.response.send_message("✅ 送信しました。", ephemeral=True)
 
 
-# ====== 登録確認 / 強制再同期 / 招待リンク / 手動登録 ======
+# ====== 診断 / 確認 / 再同期 / 招待リンク / 手動登録 ======
+@tree.command(name="diag_here", description="このチャンネルでコマンドを使えるか診断します（あなた基準）。")
+@role_check()
+async def diag_here(interaction: discord.Interaction):
+    m = interaction.user if isinstance(interaction.user, discord.Member) else None
+    ch = interaction.channel
+    if not m or not hasattr(ch, "permissions_for"):
+        return await interaction.response.send_message("ギルドのテキストチャンネルで実行してください。", ephemeral=True)
+    perms = ch.permissions_for(m)
+    role_ids = [r.id for r in m.roles]
+    has_role = any(rid == ALLOWED_ROLE_ID for rid in role_ids)
+    await interaction.response.send_message(
+        "\n".join([
+            f"Guild: {interaction.guild.id}",
+            f"Channel: {ch.id}",
+            f"あなたのロールIDs: {role_ids}",
+            f"必須ロール保持: {has_role}",
+            f"Use Application Commands: {perms.use_application_commands}",
+            f"Send Messages: {perms.send_messages}",
+            f"Embed Links: {perms.embed_links}",
+            f"Read Message History: {perms.read_message_history}",
+        ]),
+        ephemeral=True
+    )
+
 @tree.command(name="list_commands", description="このサーバーに登録済みのスラッシュコマンド一覧を表示します。")
 @role_check()
 async def list_commands(interaction: discord.Interaction):
@@ -256,27 +280,25 @@ async def list_commands(interaction: discord.Interaction):
         names = ["(none)"]
     await interaction.response.send_message("登録コマンド：\n" + "\n".join(names), ephemeral=True)
 
-@tree.command(name="resync_commands", description="古いコマンドを全削除し、現在の定義をギルドへ再登録します。")
+@tree.command(name="resync_commands", description="古いコマンドを全削除し、グローバル→ギルドの順で再登録します。")
 @role_check()
 async def resync_commands(interaction: discord.Interaction):
     await interaction.response.send_message("⏳ コマンドを再同期中…", ephemeral=True)
     try:
-        # グローバル側を一旦クリア（幽霊対策）
+        # ① グローバルをクリアして最新に同期
         tree.clear_commands(guild=None)
-        await tree.sync()
+        await tree.sync()  # 統合画面対策として必ずグローバルへ登録
 
-        # 対象ギルドを決定
+        # ② 参加ギルドへ “グローバル定義をコピー → 同期”
         joined_ids = {g.id for g in bot.guilds}
         target_ids = [gid for gid in GUILD_IDS if gid in joined_ids] or list(joined_ids)
-
-        # 各ギルドに “グローバル定義をコピー → 同期”
         for gid in target_ids:
             gobj = discord.Object(id=gid)
             tree.clear_commands(guild=gobj)
             tree.copy_global_to(guild=gobj)
             await tree.sync(guild=gobj)
 
-        await interaction.followup.send("✅ 再同期が完了しました。Discordを再読込すると反映が早いです。", ephemeral=True)
+        await interaction.followup.send("✅ 再同期完了。Discordを再読込してからお試しください。", ephemeral=True)
     except discord.Forbidden:
         await interaction.followup.send("❌ Missing Access。招待URLの scope=bot+applications.commands と権限を確認してください。", ephemeral=True)
     except Exception as e:
@@ -304,14 +326,21 @@ async def force_register(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ エラー: {e}", ephemeral=True)
 
 
-# ====== 起動・同期（確実にギルドへ反映） ======
+# ====== 起動・同期（グローバル→ギルドの順で確実に反映） ======
 @bot.event
 async def on_ready():
     try:
         joined_ids = [g.id for g in bot.guilds]
         log.info(f"Joined guilds: {joined_ids}")
 
-        # 1) 環境変数のIDに一致するもの、なければ全参加ギルドにフォールバック
+        # ① まずグローバルへ現在の定義を同期（統合画面で「コマンドなし」を防ぐ）
+        try:
+            await tree.sync()
+            log.info("Synced commands globally")
+        except Exception as e:
+            log.exception(f"Global sync failed: {e}")
+
+        # ② そのグローバル定義を各ギルドにコピーして即同期
         target_ids = [gid for gid in GUILD_IDS if gid in joined_ids] or joined_ids
         if _GUILD_IDS_ENV and not any(gid in joined_ids for gid in GUILD_IDS):
             log.warning("GUILD_IDS に参加していないIDが指定されています。全参加ギルドへフォールバック同期します。")
@@ -319,17 +348,15 @@ async def on_ready():
         for gid in target_ids:
             gobj = discord.Object(id=gid)
             try:
-                # 重要：グローバル定義をギルドへコピーして同期
                 tree.clear_commands(guild=gobj)
                 tree.copy_global_to(guild=gobj)
                 await tree.sync(guild=gobj)
-
                 names = [c.name for c in tree.get_commands(guild=gobj)]
                 log.info(f"Synced to guild {gid}: {len(names)} commands -> {names}")
             except discord.Forbidden:
                 log.error(f"Missing access to sync guild {gid}. scope と権限を確認してください。")
             except Exception as e:
-                log.exception(f"Sync failed for guild {gid}: {e}")
+                log.exception(f"Guild sync failed for {gid}: {e}")
     except Exception as e:
         log.exception("Slash command sync failed: %s", e)
 
