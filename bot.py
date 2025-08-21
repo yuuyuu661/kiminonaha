@@ -259,19 +259,70 @@ async def say(
     log.info(f"/say used by {interaction.user.id} in {interaction.channel_id}")
 
 
-# ====== 起動・同期 ======
+# ====== 登録確認 & 強制再同期 ======
+@tree.command(name="list_commands", description="このサーバーに登録済みのスラッシュコマンド一覧を表示します。")
+@role_check()
+async def list_commands(interaction: discord.Interaction):
+    cmds = [f"/{c.name} — {c.description or ''}" for c in tree.get_commands(guild=interaction.guild)]
+    if not cmds:
+        cmds = ["(none)"]
+    await interaction.response.send_message("登録コマンド：\n" + "\n".join(cmds), ephemeral=True)
+
+@tree.command(name="resync_commands", description="古いスラッシュコマンドを全削除し、現在の定義で再同期します。")
+@role_check()
+async def resync_commands(interaction: discord.Interaction):
+    await interaction.response.send_message("⏳ コマンドを再同期中…", ephemeral=True)
+    try:
+        # グローバルをクリア → 同期（ここでは現定義を反映）
+        tree.clear_commands(guild=None)
+        await tree.sync()
+
+        # 参加中のギルドだけに再同期
+        joined_ids = {g.id for g in bot.guilds}
+        target_ids = [gid for gid in GUILD_IDS if gid in joined_ids] if GUILD_IDS else list(joined_ids)
+
+        for gid in target_ids:
+            guild_obj = discord.Object(id=gid)
+            tree.clear_commands(guild=guild_obj)
+            await tree.sync(guild=guild_obj)
+
+        await interaction.followup.send("✅ 再同期が完了しました。Discordを再読込すると反映が早いです。", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Missing Access。招待スコープ `applications.commands` と権限を確認してください。", ephemeral=True)
+    except Exception as e:
+        log.exception("Resync failed: %s", e)
+        await interaction.followup.send(f"❌ 予期せぬエラー: {e}", ephemeral=True)
+
+
+# ====== 起動・同期（堅牢版） ======
 @bot.event
 async def on_ready():
     try:
         if GUILD_IDS:
-            for gid in GUILD_IDS:
-                await tree.sync(guild=discord.Object(id=gid))  # 即時ギルド同期
-                log.info(f"Synced commands to guild {gid}")
+            joined_ids = {g.id for g in bot.guilds}
+            target_ids = [gid for gid in GUILD_IDS if gid in joined_ids]
+            missing = [gid for gid in GUILD_IDS if gid not in joined_ids]
+            if missing:
+                log.warning(f"Bot is not in these guilds (skip sync): {missing}")
+
+            for gid in target_ids:
+                try:
+                    await tree.sync(guild=discord.Object(id=gid))  # 即時ギルド同期
+                    log.info(f"Synced commands to guild {gid}")
+                except discord.Forbidden:
+                    log.error(f"Missing access to sync guild {gid}. Check invite scope 'applications.commands' and permissions.")
+                except Exception as e:
+                    log.exception(f"Sync failed for guild {gid}: {e}")
         else:
-            await tree.sync()  # グローバル同期（反映遅い）
+            await tree.sync()  # グローバル同期（反映遅め）
             log.info("Synced commands globally")
     except Exception as e:
         log.exception("Slash command sync failed: %s", e)
+
+    # 同期結果の可視化（デバッグ）
+    for g in bot.guilds:
+        names = [c.name for c in tree.get_commands(guild=g)]
+        log.info(f"Guild {g.id}: {len(names)} commands -> {names}")
 
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
