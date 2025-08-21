@@ -165,9 +165,12 @@ async def status_anon(interaction: discord.Interaction):
     male_url = store["avatars"].get("male", "(未設定)")
     female_url = store["avatars"].get("female", "(未設定)")
     msg = (
-        f"対象カテゴリ: <#{TARGET_CATEGORY_ID}>\n"
-        f"次の男性別名: 男{store['male_next']} / 次の女性別名: 女{store['female_next']}\n"
-        f"男性アイコン: {male_url}\n"
+        f"対象カテゴリ: <#{TARGET_CATEGORY_ID}>
+"
+        f"次の男性別名: 男{store['male_next']} / 次の女性別名: 女{store['female_next']}
+"
+        f"男性アイコン: {male_url}
+"
         f"女性アイコン: {female_url}"
     )
     await interaction.response.send_message(msg, ephemeral=True)
@@ -222,12 +225,14 @@ async def on_message(message: discord.Message):
             for att in message.attachments:
                 files.append(await att.to_file())
 
-    if message.reference and isinstance(message.reference.resolved, discord.Message):
-        quoted = message.reference.resolved
-        head = (quoted.content or "(添付のみ)").replace("`", "\u200b`")
-        head = head[:120] + ("…" if len(head) > 120 else "")
-        content = f"> **返信:** {head}\n{content}"
-        
+        # 返信は引用に変換（Webhookでの message reference 代替）
+        if message.reference and isinstance(message.reference.resolved, discord.Message):
+            quoted = message.reference.resolved
+            head = (quoted.content or "(添付のみ)").replace("`", "​`")
+            head = head[:120] + ("…" if len(head) > 120 else "")
+            content = f"> **返信:** {head}
+{content}"
+
         await webhook.send(
             content or "​",
             username=store["users"][uid]["alias"],
@@ -272,5 +277,3 @@ if __name__ == "__main__":
         print("Please set DISCORD_TOKEN")
     else:
         bot.run(TOKEN)
-
-
