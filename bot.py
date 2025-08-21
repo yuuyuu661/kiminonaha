@@ -7,8 +7,11 @@ from discord import app_commands
 # ====== 環境変数 ======
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # 必須
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-# ギルド即時反映（カンマ区切りで複数可）
+# 即時反映したいサーバーIDをカンマ区切りで（例: "1398607685158440991,123..."）
 GUILD_IDS = [int(x.strip()) for x in os.getenv("GUILD_IDS", "1398607685158440991").split(",") if x.strip().isdigit()]
+
+# ====== 制限ロール ======
+ALLOWED_ROLE_ID = 1398724601256874014  # ← このロール所持者のみ実行可
 
 # ====== ログ ======
 logging.basicConfig(
@@ -24,10 +27,35 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 
+# ====== 権限チェック ======
+def has_required_role(interaction: discord.Interaction) -> bool:
+    """指定ロールを持っているか確認"""
+    if not interaction.user or not isinstance(interaction.user, discord.Member):
+        return False
+    return any(r.id == ALLOWED_ROLE_ID for r in interaction.user.roles)
+
+def role_check():
+    return app_commands.check(lambda i: has_required_role(i))
+
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # 権限不足の文言を分かりやすく出す
+    if isinstance(error, app_commands.CheckFailure):
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("このコマンドを使う権限がありません。", ephemeral=True)
+            else:
+                await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
+        except Exception:
+            pass
+        return
+    # その他はログのみ
+    log.exception("App command error: %s", error)
+
+
 # ====== 共通ユーティリティ ======
 def channel_jump_url(guild_id: int, channel_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}"
-
 
 async def pick_representative_text_channel_for_category(guild: discord.Guild, category_id: int) -> discord.TextChannel | None:
     category = discord.utils.get(guild.categories, id=category_id)
@@ -42,6 +70,7 @@ async def pick_representative_text_channel_for_category(guild: discord.Guild, ca
 
 # ====== ボタン作成コマンド ======
 @tree.command(name="create_jump_button", description="指定したチャンネルへ飛べるボタンを作成します。")
+@role_check()
 @app_commands.describe(
     channel_id="ジャンプ先のチャンネルID（テキスト/ボイスどちらでも可）",
     label="ボタンの表示名（未指定時はチャンネル名）",
@@ -60,7 +89,7 @@ async def create_jump_button(interaction: discord.Interaction, channel_id: str, 
     if channel is None:
         return await interaction.response.send_message("指定チャンネルが見つかりません。権限/IDをご確認ください。", ephemeral=True)
 
-    button_label = label or (channel.name if hasattr(channel, "name") else "Open Channel")
+    button_label = label or (getattr(channel, "name", None) or "Open Channel")
     url = channel_jump_url(guild.id, target_id)
 
     view = discord.ui.View()
@@ -77,6 +106,7 @@ async def create_jump_button(interaction: discord.Interaction, channel_id: str, 
 
 
 @tree.command(name="create_category_button", description="カテゴリの代表テキストチャンネルへ飛べるボタンを作成します。")
+@role_check()
 @app_commands.describe(
     category_id="カテゴリID（カテゴリ自体に直リンク不可のため、最上段のテキストチャンネルに飛びます）",
     label="ボタンの表示名（未指定時はカテゴリ名）",
@@ -119,6 +149,7 @@ async def create_category_button(interaction: discord.Interaction, category_id: 
 
 
 @tree.command(name="create_category_menu", description="カテゴリ内の複数チャンネルへ飛べるボタンをまとめて作成します。")
+@role_check()
 @app_commands.describe(
     category_id="カテゴリID（内部のテキストチャンネルから最大5個ボタン化）",
     max_buttons="作成するボタン数（1〜5。既定5）",
@@ -164,6 +195,7 @@ async def create_category_menu(interaction: discord.Interaction, category_id: st
 
 # ====== 文章送信コマンド ======
 @tree.command(name="say", description="Botとしてこのチャンネルへ任意の文章を投稿します。")
+@role_check()
 @app_commands.describe(
     content="投稿する本文（2000文字を超える場合は自動分割）",
     as_embed="埋め込みで送信する（長文時に見やすい）",
@@ -177,7 +209,6 @@ async def say(
     suppress_mentions: bool = True,
     reply_to_message_id: str | None = None
 ):
-    """指定テキストをボットとして送信。"""
     channel = interaction.channel
     if not isinstance(channel, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
         return await interaction.response.send_message("テキストチャンネル内で実行してください。", ephemeral=True)
@@ -191,16 +222,16 @@ async def say(
                 msg = await channel.fetch_message(ref_id)
                 reference = msg.to_reference()
         except Exception:
-            # 取得失敗でも続行（単に返信しない）
-            reference = None
+            reference = None  # 取得失敗でも続行
 
     # メンション制御
-    allowed = discord.AllowedMentions(everyone=not suppress_mentions,
-                                      roles=not suppress_mentions,
-                                      users=not suppress_mentions,
-                                      replied_user=False)
+    allowed = discord.AllowedMentions(
+        everyone=not suppress_mentions,
+        roles=not suppress_mentions,
+        users=not suppress_mentions,
+        replied_user=False
+    )
 
-    # 送信処理
     async def send_text(text: str):
         if as_embed:
             embed = discord.Embed(description=text, color=0x95A5A6)
@@ -208,8 +239,8 @@ async def say(
         else:
             await channel.send(text, allowed_mentions=allowed, reference=reference)
 
-    # 2000文字制限対応：分割（改行優先で切り出し、最悪ハードカット）
-    MAX_LEN = 2000 if not as_embed else 4096  # Embed description上限
+    # 文字数制限対応（Embed: 4096 / 通常: 2000）
+    MAX_LEN = 4096 if as_embed else 2000
     if len(content) <= MAX_LEN:
         await send_text(content)
     else:
@@ -218,7 +249,6 @@ async def say(
             if len(buf) <= MAX_LEN:
                 chunk, buf = buf, ""
             else:
-                # 余裕を持って切る
                 cut = buf.rfind("\n", 0, MAX_LEN)
                 if cut == -1:
                     cut = MAX_LEN
@@ -228,16 +258,17 @@ async def say(
     await interaction.response.send_message("✅ 送信しました。", ephemeral=True)
     log.info(f"/say used by {interaction.user.id} in {interaction.channel_id}")
 
+
 # ====== 起動・同期 ======
 @bot.event
 async def on_ready():
     try:
         if GUILD_IDS:
             for gid in GUILD_IDS:
-                await tree.sync(guild=discord.Object(id=gid))
+                await tree.sync(guild=discord.Object(id=gid))  # 即時ギルド同期
                 log.info(f"Synced commands to guild {gid}")
         else:
-            await tree.sync()
+            await tree.sync()  # グローバル同期（反映遅い）
             log.info("Synced commands globally")
     except Exception as e:
         log.exception("Slash command sync failed: %s", e)
