@@ -8,7 +8,7 @@ from discord import app_commands
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # 必須
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# GUILD_IDS: 空なら “全参加ギルドへ同期”。カンマ区切りで複数可。
+# GUILD_IDS: 空なら “参加中すべてのギルド” へ同期。カンマ区切りで複数可。
 _GUILD_IDS_ENV = os.getenv("GUILD_IDS", "").strip()
 GUILD_IDS = [int(x.strip()) for x in _GUILD_IDS_ENV.split(",") if x.strip().isdigit()]
 
@@ -99,9 +99,7 @@ async def create_jump_button(interaction: discord.Interaction, channel_id: str, 
         description=f"{channel.mention} へ移動するボタンです。",
         color=0x2ECC71
     )
-
     await interaction.response.send_message(embed=embed, view=view)
-    log.info(f"Posted jump button to channel {interaction.channel_id} -> {url}")
 
 
 @tree.command(name="create_category_button", description="カテゴリの代表テキストチャンネルへ飛べるボタンを作成します。")
@@ -126,10 +124,7 @@ async def create_category_button(interaction: discord.Interaction, category_id: 
 
     rep_ch = await pick_representative_text_channel_for_category(guild, cat_id)
     if rep_ch is None:
-        return await interaction.response.send_message(
-            "このカテゴリにテキストチャンネルがありません。リンク先を作れませんでした。",
-            ephemeral=True
-        )
+        return await interaction.response.send_message("このカテゴリにテキストチャンネルがありません。リンク先を作れませんでした。", ephemeral=True)
 
     button_label = label or f"{category.name} を開く"
     url = channel_jump_url(guild.id, rep_ch.id)
@@ -142,9 +137,7 @@ async def create_category_button(interaction: discord.Interaction, category_id: 
         description=f"カテゴリ **{category.name}** の代表チャンネル {rep_ch.mention} を開きます。",
         color=0x3498DB
     )
-
     await interaction.response.send_message(embed=embed, view=view)
-    log.info(f"Posted category button to channel {interaction.channel_id} -> {url}")
 
 
 @tree.command(name="create_category_menu", description="カテゴリ内の複数チャンネルへ飛べるボタンをまとめて作成します。")
@@ -252,39 +245,41 @@ async def say(
             await send_text(chunk)
 
     await interaction.response.send_message("✅ 送信しました。", ephemeral=True)
-    log.info(f"/say used by {interaction.user.id} in {interaction.channel_id}")
 
 
-# ====== 登録確認 / 強制再同期 / 招待リンク ======
+# ====== 登録確認 / 強制再同期 / 招待リンク / 手動登録 ======
 @tree.command(name="list_commands", description="このサーバーに登録済みのスラッシュコマンド一覧を表示します。")
 @role_check()
 async def list_commands(interaction: discord.Interaction):
-    cmds = [f"/{c.name} — {c.description or ''}" for c in tree.get_commands(guild=interaction.guild)]
-    if not cmds:
-        cmds = ["(none)"]
-    await interaction.response.send_message("登録コマンド：\n" + "\n".join(cmds), ephemeral=True)
+    names = [f"/{c.name} — {c.description or ''}" for c in tree.get_commands(guild=interaction.guild)]
+    if not names:
+        names = ["(none)"]
+    await interaction.response.send_message("登録コマンド：\n" + "\n".join(names), ephemeral=True)
 
-@tree.command(name="resync_commands", description="古いスラッシュコマンドを全削除し、現在の定義で再同期します。")
+@tree.command(name="resync_commands", description="古いコマンドを全削除し、現在の定義をギルドへ再登録します。")
 @role_check()
 async def resync_commands(interaction: discord.Interaction):
     await interaction.response.send_message("⏳ コマンドを再同期中…", ephemeral=True)
     try:
+        # グローバル側を一旦クリア（幽霊対策）
         tree.clear_commands(guild=None)
         await tree.sync()
 
+        # 対象ギルドを決定
         joined_ids = {g.id for g in bot.guilds}
-        target_ids = GUILD_IDS if GUILD_IDS else list(joined_ids)
+        target_ids = [gid for gid in GUILD_IDS if gid in joined_ids] or list(joined_ids)
 
+        # 各ギルドに “グローバル定義をコピー → 同期”
         for gid in target_ids:
-            guild_obj = discord.Object(id=gid)
-            tree.clear_commands(guild=guild_obj)
-            await tree.sync(guild=guild_obj)
+            gobj = discord.Object(id=gid)
+            tree.clear_commands(guild=gobj)
+            tree.copy_global_to(guild=gobj)
+            await tree.sync(guild=gobj)
 
         await interaction.followup.send("✅ 再同期が完了しました。Discordを再読込すると反映が早いです。", ephemeral=True)
     except discord.Forbidden:
-        await interaction.followup.send("❌ Missing Access。招待スコープ `bot+applications.commands` と権限を確認してください。", ephemeral=True)
+        await interaction.followup.send("❌ Missing Access。招待URLの scope=bot+applications.commands と権限を確認してください。", ephemeral=True)
     except Exception as e:
-        log.exception("Resync failed: %s", e)
         await interaction.followup.send(f"❌ 予期せぬエラー: {e}", ephemeral=True)
 
 @tree.command(name="invite_link", description="このBotの正しい招待URLを表示します。")
@@ -294,40 +289,49 @@ async def invite_link(interaction: discord.Interaction, permissions: int = 84992
     url = f"https://discord.com/oauth2/authorize?client_id={cid}&permissions={permissions}&scope=bot+applications.commands"
     await interaction.response.send_message(f"招待URL：\n{url}", ephemeral=True)
 
+@tree.command(name="force_register", description="グローバル定義をこのサーバーにコピーして即同期します。")
+@role_check()
+async def force_register(interaction: discord.Interaction):
+    await interaction.response.send_message("⏳ 登録反映中…", ephemeral=True)
+    try:
+        gobj = discord.Object(id=interaction.guild.id)
+        tree.clear_commands(guild=gobj)
+        tree.copy_global_to(guild=gobj)
+        await tree.sync(guild=gobj)
+        names = [c.name for c in tree.get_commands(guild=gobj)]
+        await interaction.followup.send(f"✅ 同期完了：{names}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ エラー: {e}", ephemeral=True)
 
-# ====== 起動・同期（必ずどこかに同期されるフォールバック付き） ======
+
+# ====== 起動・同期（確実にギルドへ反映） ======
 @bot.event
 async def on_ready():
     try:
         joined_ids = [g.id for g in bot.guilds]
         log.info(f"Joined guilds: {joined_ids}")
 
-        # 1) GUILD_IDS が指定されていればそのギルドに同期
-        target_ids = [gid for gid in GUILD_IDS if gid in joined_ids]
+        # 1) 環境変数のIDに一致するもの、なければ全参加ギルドにフォールバック
+        target_ids = [gid for gid in GUILD_IDS if gid in joined_ids] or joined_ids
+        if _GUILD_IDS_ENV and not any(gid in joined_ids for gid in GUILD_IDS):
+            log.warning("GUILD_IDS に参加していないIDが指定されています。全参加ギルドへフォールバック同期します。")
 
-        # 2) 指定が空 or どれも参加していない場合は、参加している全ギルドに同期（フォールバック）
-        if not target_ids:
-            target_ids = joined_ids
-            if _GUILD_IDS_ENV:
-                log.warning("GUILD_IDS に参加していないIDが指定されています。全参加ギルドへフォールバック同期します。")
-
-        # 同期実行
         for gid in target_ids:
+            gobj = discord.Object(id=gid)
             try:
-                await tree.sync(guild=discord.Object(id=gid))
-                log.info(f"Synced commands to guild {gid}")
+                # 重要：グローバル定義をギルドへコピーして同期
+                tree.clear_commands(guild=gobj)
+                tree.copy_global_to(guild=gobj)
+                await tree.sync(guild=gobj)
+
+                names = [c.name for c in tree.get_commands(guild=gobj)]
+                log.info(f"Synced to guild {gid}: {len(names)} commands -> {names}")
             except discord.Forbidden:
-                log.error(f"Missing access to sync guild {gid}. Check invite scope and permissions.")
+                log.error(f"Missing access to sync guild {gid}. scope と権限を確認してください。")
             except Exception as e:
                 log.exception(f"Sync failed for guild {gid}: {e}")
-
     except Exception as e:
         log.exception("Slash command sync failed: %s", e)
-
-    # デバッグ：各ギルドの登録コマンド名を出力
-    for g in bot.guilds:
-        names = [c.name for c in tree.get_commands(guild=g)]
-        log.info(f"Guild {g.id}: {len(names)} commands -> {names}")
 
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
